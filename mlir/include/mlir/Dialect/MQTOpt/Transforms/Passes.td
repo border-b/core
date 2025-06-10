@@ -36,6 +36,24 @@ def CancelConsecutiveInverses : Pass<"cancel-consecutive-inverses", "mlir::Modul
   }];
 }
 
+def MergeRotationGates : Pass<"merge-rotation-gates", "mlir::ModuleOp"> {
+  let summary = "This pass merges consecutive parametrized rotation gates of the same type.";
+  let description = [{
+    This pass identifies consecutive applications of the same parametrized rotation gate on the same qubits
+    and merges them by combining their rotation angles. Supported gates include rx, ry, rz, p, rxx, ryy, rzz,
+    rzx, xxminusyy, xxplusyy, u, and u2.
+
+    The pass handles both static and dynamic parameters, and supports an optional tolerance for cancellation
+    when the total rotation is close to 0 or 2π.
+  }];
+  let options = [
+    Option<"tolerance", "tolerance", "double", /*default=*/"1e-10",
+           "Tolerance for gate cancellation when rotation angle is close to 0 or 2π">,
+    Option<"enableCancellation", "enable-cancellation", "bool", /*default=*/"true",
+           "Enable rotation gate cancellation when total angle is approximately 0 or 2π">
+  ];
+}
+
 def QuantumSinkPass : Pass<"quantum-sink", "mlir::ModuleOp"> {
   let summary = "This pass attempts to push down operations into branches for possible optimizations.";
   let description = [{
