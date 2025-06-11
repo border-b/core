@@ -74,14 +74,41 @@ std::optional<double> extractStaticParameter(UnitaryInterface op,
 /**
  * @brief Extract dynamic parameter value.
  */
-mlir::Value extractDynamicParameter(UnitaryInterface op, size_t paramIndex) {
-  auto params = op->getOperands().take_front(
+std::optional<mlir::Value> extractDynamicParameter(UnitaryInterface op,
+                                                   size_t paramIndex) {
+  auto sizes =
       op->getAttrOfType<mlir::DenseI32ArrayAttr>("operand_segment_sizes")
-          .asArrayRef()[0]);
-  if (paramIndex >= params.size()) {
-    return nullptr;
+          .asArrayRef();
+  size_t dynCount = sizes[0];
+  auto params = op->getOperands().take_front(dynCount);
+
+  auto mask = op->getAttrOfType<mlir::DenseBoolArrayAttr>("params_mask");
+  if (!mask) {
+    // No mask means all parameters are dynamic (1-to-1 mapping)
+    if (paramIndex >= params.size()) {
+      return std::nullopt;
+    }
+    return params[paramIndex];
   }
-  return params[paramIndex];
+
+  // Count dynamic parameters up to paramIndex
+  size_t dynIdx = 0;
+  for (size_t i = 0; i <= paramIndex; ++i) {
+    if (i < static_cast<size_t>(mask.size()) &&
+        !mask[i]) { // false means dynamic
+      ++dynIdx;
+    }
+  }
+
+  if (dynIdx == 0) {
+    return std::nullopt; // Parameter is static
+  }
+
+  if (dynIdx - 1 >= params.size()) {
+    return std::nullopt; // Index out of bounds
+  }
+
+  return params[dynIdx - 1];
 }
 
 /**
@@ -397,26 +424,27 @@ struct MergeConsecutiveRotationsPattern final
         // Normalize the combined angle
         combinedAngle = normalizeAngle(combinedAngle);
 
-        // Snap to exact common angles to improve textual stability.
-        const double PI = M_PI;
-        const double HALF_PI = PI / 2.0;
-        const double QUARTER_PI = PI / 4.0;
-        auto snapIfClose = [&](double target) {
-          if (std::abs(combinedAngle - target) < 1e-12) {
-            combinedAngle = target;
-          }
-        };
-        snapIfClose(PI);
-        snapIfClose(HALF_PI);
-        snapIfClose(QUARTER_PI);
-
-        // Check for cancellation of this parameter
+        // Check for cancellation first - if angle is close to 0 or 2π
         if (enableCancellation && shouldCancelAngle(combinedAngle, tolerance)) {
           // This parameter cancels out, but continue checking others
           staticParams[i] = 0.0;
           paramMask[i] = true; // static (mask bit true marks static)
         } else {
           allCancelled = false;
+
+          // Snap to exact common angles within same tolerance for consistency
+          const double PI = M_PI;
+          const double HALF_PI = PI / 2.0;
+          const double QUARTER_PI = PI / 4.0;
+          auto snapIfClose = [&](double target) {
+            if (std::abs(combinedAngle - target) < tolerance) {
+              combinedAngle = target;
+            }
+          };
+          snapIfClose(PI);
+          snapIfClose(HALF_PI);
+          snapIfClose(QUARTER_PI);
+
           staticParams[i] = combinedAngle;
           paramMask[i] = true; // static
         }
@@ -431,13 +459,17 @@ struct MergeConsecutiveRotationsPattern final
             return;
           // Use dynamic parameter type for consistency
           auto existingDynamicParam = extractDynamicParameter(secondOp, i);
-          auto paramType = existingDynamicParam ? existingDynamicParam.getType()
-                                                : rewriter.getF64Type();
+          auto paramType = existingDynamicParam
+                               ? existingDynamicParam->getType()
+                               : rewriter.getF64Type();
           firstParam = rewriter.create<mlir::arith::ConstantOp>(
               firstOp.getLoc(), paramType,
               rewriter.getF64FloatAttr(*staticVal));
         } else {
-          firstParam = extractDynamicParameter(firstOp, i);
+          auto dynamicParam = extractDynamicParameter(firstOp, i);
+          if (!dynamicParam)
+            return;
+          firstParam = *dynamicParam;
         }
 
         if (secondStatic) {
@@ -446,13 +478,17 @@ struct MergeConsecutiveRotationsPattern final
             return;
           // Use dynamic parameter type for consistency
           auto existingDynamicParam = extractDynamicParameter(firstOp, i);
-          auto paramType = existingDynamicParam ? existingDynamicParam.getType()
-                                                : rewriter.getF64Type();
+          auto paramType = existingDynamicParam
+                               ? existingDynamicParam->getType()
+                               : rewriter.getF64Type();
           secondParam = rewriter.create<mlir::arith::ConstantOp>(
               secondOp.getLoc(), paramType,
               rewriter.getF64FloatAttr(*staticVal));
         } else {
-          secondParam = extractDynamicParameter(secondOp, i);
+          auto dynamicParam = extractDynamicParameter(secondOp, i);
+          if (!dynamicParam)
+            return;
+          secondParam = *dynamicParam;
         }
 
         if (!firstParam || !secondParam) {
